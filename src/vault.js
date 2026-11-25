@@ -71,6 +71,7 @@ export async function createVault(password, kdf = KDF_DEFAULTS) {
     header: { v: VERSION, kdf: { ...kdf }, salt, wrapped, created: Date.now() },
     data,
     settings: { ...DEFAULT_SETTINGS },
+    lastMaster: Date.now(),
   });
   session = s;
   emit();
@@ -85,6 +86,28 @@ export async function unlock(password) {
     session = await openSession(vaultRaw, await dbGet('data'));
   } catch (e) {
     wipe(vaultRaw);
+    throw e;
+  }
+  await dbSet('lastMaster', Date.now()); // restarts the 3-day master-password clock
+  emit();
+}
+
+/** When the master password was last entered (ms epoch), or 0. */
+export async function getLastMasterUnlock() {
+  return (await dbGet('lastMaster')) || 0;
+}
+
+/** Copy of the in-memory vault key, for wrapping under a biometric key. Caller must wipe() it. */
+export function getVaultKeyRaw() {
+  return new Uint8Array(requireSession().raw);
+}
+
+/** Unlock using an already-unwrapped vault key (biometric path). Takes ownership of `raw`. */
+export async function unlockWithVaultKey(raw) {
+  try {
+    session = await openSession(raw, await dbGet('data')); // throws DecryptError if key is wrong
+  } catch (e) {
+    wipe(raw);
     throw e;
   }
   emit();
@@ -252,6 +275,7 @@ export async function restoreBackup(obj, password) {
     header: { v: VERSION, kdf: b.kdf, salt: b.salt, wrapped: b.wrapped, created: Date.now() },
     data: b.data,
     settings: { ...DEFAULT_SETTINGS },
+    lastMaster: Date.now(),
   });
   if (session) wipe(session.raw);
   session = s;

@@ -2,6 +2,7 @@ import './styles.css';
 import { version } from '../package.json';
 import { h, icon, iconBtn, toast, sheet, confirmDialog, passwordDialog } from './dom.js';
 import * as vault from './vault.js';
+import * as bio from './bio.js';
 import { generatePassword, generatePassphrase, estimateBits, strengthLabel } from './generator.js';
 
 const app = document.getElementById('app');
@@ -52,8 +53,12 @@ function armIdle() {
 ['pointerdown', 'keydown', 'touchstart', 'scroll', 'input'].forEach((ev) =>
   window.addEventListener(ev, armIdle, { capture: true, passive: true }),
 );
-document.addEventListener('visibilitychange', () => { if (document.hidden) doLock(); });
-window.addEventListener('pagehide', doLock);
+let suppressLock = false; // true while a WebAuthn/biometric sheet is open (it may blur the page)
+let lockAuto = null;      // lock screen registers its fingerprint prompt here
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { if (!suppressLock) doLock(); } else if (!vault.isUnlocked()) lockAuto?.();
+});
+window.addEventListener('pagehide', () => { if (!suppressLock) doLock(); });
 
 function doLock() {
   clearTimeout(idleTimer);
@@ -205,31 +210,71 @@ function setupScreen() {
 function lockScreen() {
   const pw = h('input', { type: 'password', autocomplete: 'off', autocapitalize: 'off', spellcheck: false, placeholder: 'Master password' });
   const err = h('div', { class: 'error' });
+  const note = h('div', { class: 'small muted' });
+  const bioBox = h('div', { class: 'stack' });
   const btn = h('button', { class: 'btn', type: 'button' }, 'Unlock');
+  let busy = false;
+
+  const finish = async () => {
+    idleMs = (await vault.getSettings()).autoLockMin * 60_000;
+    lockAuto = null;
+    resetToList();
+    armIdle();
+  };
+
   const submit = async () => {
-    if (!pw.value) return;
+    if (!pw.value || busy) return;
+    busy = true;
     btn.disabled = true;
     btn.textContent = 'Unlocking…';
     err.textContent = '';
     try {
       await vault.unlock(pw.value);
       pw.value = '';
-      idleMs = (await vault.getSettings()).autoLockMin * 60_000;
-      resetToList();
-      armIdle();
+      await finish();
     } catch (e) {
       err.textContent = e.name === 'DecryptError' ? 'Wrong password' : e.message;
       btn.disabled = false;
       btn.textContent = 'Unlock';
       pw.select();
     }
+    busy = false;
   };
   btn.addEventListener('click', submit);
   pw.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
-  setTimeout(() => pw.focus(), 80);
+
+  const tryBio = async () => {
+    if (busy || vault.isUnlocked()) return;
+    busy = true;
+    err.textContent = '';
+    suppressLock = true;
+    try {
+      await vault.unlockWithVaultKey(await bio.unlockKey());
+      await finish();
+    } catch (e) {
+      if (e.code !== 'cancelled') err.textContent = e.message || 'Fingerprint failed. Use your master password.';
+    } finally {
+      suppressLock = false;
+      busy = false;
+    }
+  };
+
+  (async () => {
+    if (!bio.bioSupported() || !(await bio.isEnrolled())) { setTimeout(() => pw.focus(), 80); return; }
+    if (bio.masterRequired(await vault.getLastMasterUnlock())) {
+      note.textContent = 'Master password needed now (it is required every 3 days).';
+      setTimeout(() => pw.focus(), 80);
+      return;
+    }
+    bioBox.append(h('button', { class: 'btn', type: 'button', onclick: tryBio }, 'Unlock with fingerprint'));
+    note.textContent = 'Or use your master password:';
+    lockAuto = tryBio;
+    if (!document.hidden) setTimeout(tryBio, 200);
+  })();
+
   return h('main', { class: 'center' },
     h('div', { class: 'lockhead' }, h('img', { src: './icons/icon-192.png', alt: '' }), h('h1', {}, 'Old archives')),
-    h('div', { class: 'stack' }, pw, err, btn));
+    h('div', { class: 'stack' }, bioBox, note, pw, err, btn));
 }
 
 function listScreen() {
@@ -457,12 +502,46 @@ function settingsScreen() {
       if (await restoreFlow()) { toast('Backup restored'); resetToList(); }
     };
 
+    const bioCard = h('div', { class: 'card stack' }, h('h2', {}, 'Fingerprint unlock'));
+    if (!bio.bioSupported()) {
+      bioCard.append(h('div', { class: 'small muted' }, 'Not available in this browser.'));
+    } else if (await bio.isEnrolled()) {
+      bioCard.append(
+        h('div', { class: 'small muted' }, 'On. Your master password is still required every 3 days.'),
+        h('button', {
+          class: 'btn ghost', type: 'button',
+          onclick: async () => { await bio.disable(); toast('Fingerprint unlock turned off'); go({ screen: 'settings' }, { replace: true }); },
+        }, 'Turn off'));
+    } else {
+      bioCard.append(
+        h('div', { class: 'small muted' }, 'Unlock with your fingerprint. You will be asked to touch the sensor twice while setting it up.'),
+        h('button', {
+          class: 'btn secondary', type: 'button',
+          onclick: async () => {
+            suppressLock = true;
+            const raw = vault.getVaultKeyRaw();
+            try {
+              await bio.enroll(raw);
+              toast('Fingerprint unlock is on');
+            } catch (e) {
+              toast(e.message || 'Could not set up fingerprint');
+            } finally {
+              raw.fill(0);
+              suppressLock = false;
+              armIdle();
+            }
+            if (vault.isUnlocked()) go({ screen: 'settings' }, { replace: true });
+          },
+        }, 'Turn on fingerprint unlock'));
+    }
+
     wrap.replaceChildren(
       h('div', { class: 'card stack' },
         h('h2', {}, 'Security'),
         h('label', { class: 'field' }, h('span', {}, 'Auto-lock after inactivity'), sel),
         h('div', { class: 'small muted' }, 'The vault also locks the moment the app goes to the background.'),
         h('button', { class: 'btn secondary', type: 'button', onclick: changePasswordSheet }, 'Change master password')),
+      bioCard,
       h('div', { class: 'card stack' },
         h('h2', {}, 'Backup'),
         h('div', { class: 'small muted' }, s.lastExport ? `Last manual export: ${new Date(s.lastExport).toLocaleString()}` : 'No backup exported yet.'),
@@ -513,6 +592,7 @@ async function render() {
     setup: setupScreen, lock: lockScreen, list: listScreen, view: viewScreen,
     edit: editScreen, generator: generatorScreen, settings: settingsScreen,
   };
+  if (view.screen !== 'lock') lockAuto = null;
   document.body.classList.toggle('is-lock', view.screen === 'lock' || view.screen === 'setup');
   const fn = screens[view.screen];
   app.replaceChildren(...(fn ? [fn()].flat() : []));
