@@ -9,7 +9,7 @@ const FAST = { m: 1024, t: 1, p: 1 };
 const PW = 'correct horse battery staple';
 
 // Fake platform authenticator: PRF(salt) = HMAC(secret, salt), like a real CTAP hmac-secret.
-function fakeAuthenticator({ prf = true, secret = nodeRandom(32), cancel = false } = {}) {
+function fakeAuthenticator({ prf = true, reportEnabled = true, secret = nodeRandom(32), cancel = false } = {}) {
   const credId = nodeRandom(16);
   const ext = (res) => () => res;
   return {
@@ -17,10 +17,11 @@ function fakeAuthenticator({ prf = true, secret = nodeRandom(32), cancel = false
     creds: {
       async create() {
         if (cancel) throw Object.assign(new Error('x'), { name: 'NotAllowedError' });
-        return { rawId: credId.buffer.slice(credId.byteOffset, credId.byteOffset + 16), getClientExtensionResults: ext(prf ? { prf: { enabled: true } } : {}) };
+        return { rawId: credId.buffer.slice(credId.byteOffset, credId.byteOffset + 16), getClientExtensionResults: ext(prf && reportEnabled ? { prf: { enabled: true } } : {}) };
       },
       async get({ publicKey }) {
         if (cancel) throw Object.assign(new Error('x'), { name: 'NotAllowedError' });
+        if (!prf) return { getClientExtensionResults: ext({}) };
         const salt = Buffer.from(publicKey.extensions.prf.eval.first);
         const out = createHmac('sha256', secret).update(salt).digest();
         return { getClientExtensionResults: ext({ prf: { results: { first: out.buffer.slice(out.byteOffset, out.byteOffset + 32) } } }) };
@@ -88,6 +89,24 @@ describe('fingerprint unlock (WebAuthn PRF)', () => {
     await vault.createVault(PW, FAST);
     await expect(bio.enroll(vault.getVaultKeyRaw(), opts(a))).rejects.toMatchObject({ code: 'unsupported' });
     expect(await bio.isEnrolled()).toBe(false);
+  });
+
+  it('enrols when the browser works but does not report prf.enabled at creation', async () => {
+    const a = fakeAuthenticator({ reportEnabled: false });
+    await vault.createVault(PW, FAST);
+    await bio.enroll(vault.getVaultKeyRaw(), opts(a));
+    vault.lock();
+    await vault.unlockWithVaultKey(await bio.unlockKey(opts(a)));
+    expect(vault.isUnlocked()).toBe(true);
+  });
+
+  it('asks for a discoverable passkey (needed for PRF on Android)', async () => {
+    const a = fakeAuthenticator();
+    let seen;
+    const creds = { ...a.creds, create: async (o) => { seen = o.publicKey.authenticatorSelection; return a.creds.create(o); } };
+    await vault.createVault(PW, FAST);
+    await bio.enroll(vault.getVaultKeyRaw(), { creds, rpId: 'localhost' });
+    expect(seen).toMatchObject({ residentKey: 'required', userVerification: 'required', authenticatorAttachment: 'platform' });
   });
 
   it('cancelled prompt is reported as cancelled', async () => {

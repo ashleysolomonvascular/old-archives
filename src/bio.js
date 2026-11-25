@@ -73,10 +73,10 @@ export async function enroll(vaultRaw, { creds = navigator.credentials, rpId = l
     created = await creds.create({
       publicKey: {
         rp: { id: rpId, name: 'Old archives' },
-        user: { id: randomBytes(16), name: 'owner', displayName: 'Owner' },
+        user: { id: randomBytes(16), name: 'archive', displayName: 'Old archives' },
         challenge: randomBytes(32),
         pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-        authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' },
+        authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'required', requireResidentKey: true },
         timeout: 60000,
         extensions: { prf: {} },
       },
@@ -84,12 +84,20 @@ export async function enroll(vaultRaw, { creds = navigator.credentials, rpId = l
   } catch (e) {
     throw new BioError('Fingerprint setup was cancelled or failed', e?.name === 'NotAllowedError' ? 'cancelled' : 'failed');
   }
-  if (!created?.getClientExtensionResults?.()?.prf?.enabled) {
-    throw new BioError('This phone or browser does not support fingerprint unlock for stored keys. Use your master password.', 'unsupported');
-  }
   const credId = toBytes(created.rawId);
   const prfSalt = randomBytes(32);
-  const prf = await getPrf(creds, credId, prfSalt, rpId); // second touch: proves PRF works before we rely on it
+  // Some browsers don't report prf.enabled at creation even when it works, so the real test is whether
+  // a second touch returns a PRF secret. If not, nothing is stored and the master password stays in use.
+  const flag = created?.getClientExtensionResults?.()?.prf;
+  let prf;
+  try {
+    prf = await getPrf(creds, credId, prfSalt, rpId);
+  } catch (e) {
+    if (e.code === 'unsupported') {
+      throw new BioError(`This phone or browser does not support fingerprint unlock for stored keys (PRF ${flag?.enabled === true ? 'enabled but no secret returned' : 'not reported'}). Use your master password.`, 'unsupported');
+    }
+    throw e;
+  }
   try {
     const wk = await wrapKeyFromPrf(prf);
     const wrapped = await encryptBytes(wk, vaultRaw, AAD(credId));
