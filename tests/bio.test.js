@@ -126,11 +126,12 @@ describe('fingerprint unlock (WebAuthn PRF)', () => {
     expect(vault.isUnlocked()).toBe(false);
   });
 
-  it('3-day master-password policy', async () => {
+  it('30-day master-password policy', async () => {
     const now = Date.now(), day = 86400000;
     expect(bio.masterRequired(0, now)).toBe(true);
-    expect(bio.masterRequired(now - 2.9 * day, now)).toBe(false);
-    expect(bio.masterRequired(now - 3.1 * day, now)).toBe(true);
+    expect(bio.masterRequired(now - 29.9 * day, now)).toBe(false);
+    expect(bio.masterRequired(now - 30.1 * day, now)).toBe(true);
+    expect(bio.MASTER_MAX_AGE_DAYS).toBe(30);
     await vault.createVault(PW, FAST);
     expect(bio.masterRequired(await vault.getLastMasterUnlock())).toBe(false);
     vault.lock();

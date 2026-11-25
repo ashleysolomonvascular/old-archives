@@ -88,7 +88,7 @@ export async function unlock(password) {
     wipe(vaultRaw);
     throw e;
   }
-  await dbSet('lastMaster', Date.now()); // restarts the 3-day master-password clock
+  await dbSet('lastMaster', Date.now()); // restarts the master-password clock
   emit();
 }
 

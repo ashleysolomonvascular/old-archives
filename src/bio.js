@@ -7,7 +7,8 @@
 import { randomBytes, encryptBytes, decryptBytes, wipe, DecryptError, b64 } from './crypto.js';
 import { dbGet, dbSet, dbDel } from './db.js';
 
-export const MASTER_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000; // master password needed every 3 days
+export const MASTER_MAX_AGE_DAYS = 30; // master password needed this often
+export const MASTER_MAX_AGE_MS = MASTER_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 const enc = new TextEncoder();
 const AAD = (credId) => `oa:bio:v1|${b64(credId)}`;
 
@@ -27,7 +28,7 @@ export async function isEnrolled() {
   return !!(await dbGet('bio'));
 }
 
-/** True when the master password must be used (no enrolment, or last entry more than 3 days ago). */
+/** True when the master password must be used (no enrolment, or last entry more than 30 days ago). */
 export function masterRequired(lastMasterMs, now = Date.now()) {
   return !lastMasterMs || now - lastMasterMs > MASTER_MAX_AGE_MS;
 }

@@ -262,7 +262,7 @@ function lockScreen() {
   (async () => {
     if (!bio.bioSupported() || !(await bio.isEnrolled())) { setTimeout(() => pw.focus(), 80); return; }
     if (bio.masterRequired(await vault.getLastMasterUnlock())) {
-      note.textContent = 'Master password needed now (it is required every 3 days).';
+      note.textContent = `Master password needed now (it is required every ${bio.MASTER_MAX_AGE_DAYS} days).`;
       setTimeout(() => pw.focus(), 80);
       return;
     }
@@ -507,7 +507,7 @@ function settingsScreen() {
       bioCard.append(h('div', { class: 'small muted' }, 'Not available in this browser.'));
     } else if (await bio.isEnrolled()) {
       bioCard.append(
-        h('div', { class: 'small muted' }, 'On. Your master password is still required every 3 days.'),
+        h('div', { class: 'small muted' }, `On. Your master password is still required every ${bio.MASTER_MAX_AGE_DAYS} days.`),
         h('button', {
           class: 'btn ghost', type: 'button',
           onclick: async () => { await bio.disable(); toast('Fingerprint unlock turned off'); go({ screen: 'settings' }, { replace: true }); },
