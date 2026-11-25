@@ -17,4 +17,4 @@ Repo Settings → Pages → Source: **GitHub Actions**. Merge to `main`; the wor
 The app uses relative paths, so it works under `https://<user>.github.io/old-archives/`.
 
 ## Stages
-1. Vault core ✔ · 2. Fingerprint unlock ✔ · 3. Drive auto-backup · 4. Memory Bank import · 5. TOTP
+1. Vault core ✔ · 2. Fingerprint unlock ✔ · 3. Drive auto-backup ✔ (needs Google client ID in src/config.js) · 4. Memory Bank import · 5. TOTP

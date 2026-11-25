@@ -3,6 +3,8 @@ import { version } from '../package.json';
 import { h, icon, iconBtn, toast, sheet, confirmDialog, passwordDialog } from './dom.js';
 import * as vault from './vault.js';
 import * as bio from './bio.js';
+import * as drive from './drive.js';
+import { GOOGLE_CLIENT_ID } from './config.js';
 import { generatePassword, generatePassphrase, estimateBits, strengthLabel } from './generator.js';
 
 const app = document.getElementById('app');
@@ -34,6 +36,7 @@ window.addEventListener('popstate', () => {
 });
 
 function resetToList() {
+  scheduleBackup(3000);
   stack = [];
   view = { screen: 'list' };
   render();
@@ -96,6 +99,65 @@ async function copy(text, label) {
   clearTimeout(clipTimer);
   clipTimer = setTimeout(() => navigator.clipboard.writeText('').catch(() => {}), CLIP_CLEAR_MS);
   toast(`${label} copied · clears in 30 s`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Google Drive backup glue
+// ---------------------------------------------------------------------------------------------
+const driveConfigured = () => !!GOOGLE_CLIENT_ID;
+const signIn = (pending) =>
+  drive.startAuth(pending, { clientId: GOOGLE_CLIENT_ID, redirectUri: new URL('./', location.href).href });
+
+/** Upload now if we hold a valid Google token. With interactive, sends the user to Google when we don't. */
+async function runBackup({ interactive = false } = {}) {
+  if (!driveConfigured()) return false;
+  if (!drive.getToken()) {
+    if (interactive) signIn('backup');
+    return false;
+  }
+  try {
+    await drive.backup(vault.exportBackup);
+    if (interactive) toast('Backed up to Google Drive');
+    return true;
+  } catch (e) {
+    if (e.code === 'auth' && interactive) signIn('backup');
+    else if (interactive) toast(e.message);
+    return false;
+  }
+}
+
+let backupTimer = null;
+function scheduleBackup(ms = 15_000) {
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(async () => {
+    if (drive.isDue(await drive.getRecord())) await runBackup();
+  }, ms);
+}
+vault.onDataChange(async () => {
+  await drive.markDirty();
+  scheduleBackup();
+});
+
+/** Runs after Google sends the user back to the app. */
+async function runPending(action) {
+  try {
+    if (action === 'restore') {
+      const obj = await drive.downloadLatest();
+      const pw = await passwordDialog('Backup password', 'Enter the master password this backup was made with.', 'Restore');
+      if (pw == null) return;
+      await vault.restoreBackup(obj, pw);
+      await drive.backup(vault.exportBackup).catch(() => {}); // re-link Drive to this install
+      toast('Restored from Google Drive');
+      resetToList();
+      armIdle();
+    } else {
+      await drive.backup(vault.exportBackup); // 'connect' or 'backup' (needs no unlock: ciphertext only)
+      toast('Backed up to Google Drive');
+      if (view.screen === 'settings') go({ screen: 'settings' }, { replace: true });
+    }
+  } catch (e) {
+    toast(e.name === 'DecryptError' ? 'Wrong password, or the backup is damaged' : e.message, 5000);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -215,7 +277,11 @@ function setupScreen() {
         h('button', {
           class: 'btn ghost', type: 'button',
           onclick: async () => { if (await restoreFlow()) { resetToList(); armIdle(); } },
-        }, 'Restore from a backup file'))),
+        }, 'Restore from a backup file'),
+        driveConfigured() && h('button', {
+          class: 'btn ghost', type: 'button',
+          onclick: () => (drive.getToken() ? runPending('restore') : signIn('restore')),
+        }, 'Restore from Google Drive'))),
   ];
 }
 
@@ -295,6 +361,15 @@ function listScreen() {
   if (ui.tag && !allTags.includes(ui.tag)) ui.tag = null;
 
   const listEl = h('div');
+  const banner = h('div', { class: 'banner' });
+  (async () => {
+    if (!driveConfigured()) return;
+    const rec = await drive.getRecord();
+    if (!drive.isDue(rec) || drive.getToken()) return;
+    banner.append(h('div', { class: 'warn stack' },
+      h('div', {}, rec.dirty ? 'Recent changes are not backed up to Google Drive yet.' : 'Your weekly Google Drive backup is due.'),
+      h('button', { class: 'btn', type: 'button', onclick: () => runBackup({ interactive: true }) }, 'Back up now')));
+  })();
   const q = h('input', { type: 'search', class: 'search', placeholder: 'Search', value: ui.search, autocomplete: 'off', autocapitalize: 'off', spellcheck: false });
   const chipsEl = h('div', { class: 'chips' });
 
@@ -328,7 +403,7 @@ function listScreen() {
         iconBtn('lock', 'Lock now', doLock),
       ],
     }),
-    h('main', {}, q, chipsEl, listEl),
+    h('main', {}, banner, q, chipsEl, listEl),
     h('button', { class: 'fab', type: 'button', 'aria-label': 'Add entry', onclick: () => go({ screen: 'edit', id: null }) }, icon('plus', 30)),
   ];
 }
@@ -547,6 +622,39 @@ function settingsScreen() {
         }, 'Turn on fingerprint unlock'));
     }
 
+    const driveCard = h('div', { class: 'card stack' }, h('h2', {}, 'Google Drive backup'));
+    if (!driveConfigured()) {
+      driveCard.append(h('div', { class: 'small muted' }, 'Not set up yet: this build has no Google client ID.'));
+    } else {
+      const rec = await drive.getRecord();
+      if (!rec.connected) {
+        driveCard.append(
+          h('div', { class: 'small muted' }, 'Keeps an encrypted copy in a Google Drive folder. Google only ever sees scrambled data; the app can only see files it creates itself.'),
+          h('button', { class: 'btn secondary', type: 'button', onclick: () => (drive.getToken() ? runPending('connect') : signIn('connect')) }, 'Connect Google Drive'));
+      } else {
+        driveCard.append(
+          h('div', { class: 'small muted' }, rec.lastBackup ? `Last backup: ${new Date(rec.lastBackup).toLocaleString()}` : 'No backup yet.'),
+          rec.dirty && h('div', { class: 'small muted' }, 'Recent changes are waiting to be backed up.'),
+          h('div', { class: 'small muted' }, 'Backs up a few seconds after changes and at least weekly, whenever the app is open and signed in to Google (about an hour at a time).'),
+          h('button', { class: 'btn secondary', type: 'button', onclick: async () => { await runBackup({ interactive: true }); go({ screen: 'settings' }, { replace: true }); } }, 'Back up now'),
+          h('button', {
+            class: 'btn ghost', type: 'button',
+            onclick: async () => {
+              if (!(await confirmDialog('Restore from Drive?', 'This replaces everything in this vault with the latest backup on Google Drive.', 'Continue', true))) return;
+              if (drive.getToken()) runPending('restore'); else signIn('restore');
+            },
+          }, 'Restore from Drive'),
+          h('button', {
+            class: 'btn ghost', type: 'button',
+            onclick: async () => {
+              if (!(await confirmDialog('Disconnect Drive?', 'Automatic backups stop. The existing backup file stays in your Drive. You can also revoke access in your Google account.', 'Disconnect'))) return;
+              await drive.disconnect();
+              go({ screen: 'settings' }, { replace: true });
+            },
+          }, 'Disconnect'));
+      }
+    }
+
     wrap.replaceChildren(
       h('div', { class: 'card stack' },
         h('h2', {}, 'Security'),
@@ -554,6 +662,7 @@ function settingsScreen() {
         h('div', { class: 'small muted' }, 'The vault also locks the moment the app goes to the background.'),
         h('button', { class: 'btn secondary', type: 'button', onclick: changePasswordSheet }, 'Change master password')),
       bioCard,
+      driveCard,
       h('div', { class: 'card stack' },
         h('h2', {}, 'Backup'),
         h('div', { class: 'small muted' }, s.lastExport ? `Last manual export: ${new Date(s.lastExport).toLocaleString()}` : 'No backup exported yet.'),
@@ -616,6 +725,9 @@ async function boot() {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
   view = { screen: (await vault.isInitialised()) ? 'lock' : 'setup' };
+  let pending = null;
+  try { pending = drive.handleRedirect(); } catch (e) { toast(e.message, 5000); }
   render();
+  if (pending) await runPending(pending);
 }
 boot();

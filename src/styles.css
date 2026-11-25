@@ -157,3 +157,4 @@ a { color: var(--autumn); }
 body.is-lock .btn.ghost { color: var(--on-dark); border-color: var(--coffee); }
 body.is-lock .meter { background: var(--prairie); }
 body.is-lock label.field > span, body.is-lock .small.muted { color: var(--wheat); }
+.banner:not(:empty) { margin-bottom: 12px; }

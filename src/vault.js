@@ -19,6 +19,10 @@ export const DEFAULT_SETTINGS = Object.freeze({ autoLockMin: 2 });
 let session = null; // { raw: Uint8Array, key: CryptoKey, entries: Entry[] }
 let writeChain = Promise.resolve();
 const listeners = new Set();
+const dataListeners = new Set();
+/** Fires only when entries change (save/delete/import), not on lock/unlock. */
+export const onDataChange = (fn) => (dataListeners.add(fn), () => dataListeners.delete(fn));
+const emitData = () => dataListeners.forEach((fn) => { try { fn(); } catch { /* ignore */ } });
 
 export const onChange = (fn) => (listeners.add(fn), () => listeners.delete(fn));
 const emit = () => listeners.forEach((fn) => { try { fn(); } catch { /* listener errors must not break saves */ } });
@@ -166,6 +170,7 @@ export async function saveEntry(input) {
   }
   await persist();
   emit();
+  emitData();
   return entry;
 }
 
@@ -174,6 +179,7 @@ export async function deleteEntry(id) {
   s.entries = s.entries.filter((e) => e.id !== id);
   await persist();
   emit();
+  emitData();
 }
 
 /** Bulk add (used by import). Returns number added. */
@@ -194,6 +200,7 @@ export async function addEntries(list) {
   s.entries = [...s.entries, ...added];
   await persist();
   emit();
+  emitData();
   return added.length;
 }
 
@@ -229,10 +236,10 @@ export async function changeMasterPassword(oldPassword, newPassword, kdf = KDF_D
 
 /** Self-contained, still-encrypted snapshot. Needs the master password to restore. */
 export async function exportBackup() {
-  requireSession();
   await writeChain;
   const header = await dbGet('header');
   const data = await dbGet('data');
+  if (!header || !data) throw new Error('No vault to back up');
   return {
     app: 'old-archives',
     format: VERSION,
@@ -270,12 +277,14 @@ export async function restoreBackup(obj, password) {
     throw e;
   }
   await writeChain;
+  const keepDrive = await dbGet('drive'); // Drive link is device state, not vault state
   await dbClearAll();
   await dbSetMany({
     header: { v: VERSION, kdf: b.kdf, salt: b.salt, wrapped: b.wrapped, created: Date.now() },
     data: b.data,
     settings: { ...DEFAULT_SETTINGS },
     lastMaster: Date.now(),
+    ...(keepDrive ? { drive: keepDrive } : {}),
   });
   if (session) wipe(session.raw);
   session = s;
