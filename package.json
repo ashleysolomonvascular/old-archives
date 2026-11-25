@@ -1,6 +1,6 @@
 {
   "name": "old-archives",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Personal password vault PWA",
   "main": "index.js",
   "scripts": {

@@ -60,6 +60,17 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => { if (!suppressLock) doLock(); });
 
+// Apply a new service-worker version as soon as it is safe: immediately if locked, else at next lock.
+let updatePending = false;
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; } // first install, nothing to replace
+    updatePending = true;
+    if (!vault.isUnlocked()) location.reload();
+  });
+}
+
 function doLock() {
   clearTimeout(idleTimer);
   if (!vault.isUnlocked()) return;
@@ -68,6 +79,7 @@ function doLock() {
   document.querySelectorAll('.scrim').forEach((n) => n.remove());
   stack = [];
   view = { screen: 'lock' };
+  if (updatePending) { location.reload(); return; }
   render();
 }
 vault.onChange(() => {
